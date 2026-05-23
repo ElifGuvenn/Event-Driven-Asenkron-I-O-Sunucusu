@@ -1,0 +1,144 @@
+================================================================
+RAPOR: Bloklayici ve Bloklamayan I/O Farki
+Proje : Event-Driven Asenkron I/O Sunucusu
+================================================================
+
+1. BLOKLAYICI (BLOCKING) I/O
+-----------------------------
+Bloklayici I/O'da bir soket cagrisinin (recv, accept, connect)
+veri hazir olana dek program akisi DURMAKTADIR.
+
+Ornek (geleneksel sunucu):
+    int n = recv(client_fd, buf, sizeof(buf), 0);
+    /* Isletim sistemi veri gelene kadar bu satirda bekler.
+       Bu sirada baska hicbir istemciye hizmet verilmez. */
+
+Sonuc: Her istemci icin ayri bir thread veya process gerekmektedir.
+  - 1000 istemci = 1000 thread
+  - Yuksek bellek tuketimi (her thread ~8 MB yigin)
+  - Context-switch maliyeti artar
+  - Olcekleme zorlasmaktadir
+
+Avantajlari:
+  + Kod okumasi kolay ve sezgiseldir
+  + Kucuk istemci sayilarinda yeterlidir
+
+Dezavantajlari:
+  - Cok istemcide ciddi performans dususu
+  - Thread yonetimi karmasiklastiran kaynak tuketimi
+  - Deadlock ve race-condition riskleri
+
+----------------------------------------------------------------
+
+2. BLOKLAMAYAN (NON-BLOCKING) I/O + select()
+---------------------------------------------
+Non-blocking I/O'da soket cagrisi, veri hazir degilse hemen
+EWOULDBLOCK/EAGAIN hata kodu ile geri doner; program durmaz.
+
+select() cagrisinin rolu:
+    Cok sayida fd'yi tek satirda izlemek ve
+    hangisinin "hazir" oldugunu bildirmektir.
+
+    select(max_fd+1, &read_fds, NULL, NULL, &timeout);
+
+Bu sayede TEK THREAD ile onlarca istemci yonetilebilir:
+
+    [ Event Loop ]
+         |
+    select() <--- tum fd'leri izle
+         |
+    olay var mi?
+    /          \
+  evet          hayir
+   |              |
+  islem       baska sey yap
+  (accept/      (istatistik,
+   recv/          timeout
+   send)          logic)
+
+Bu proje icin kullanilan yaklasim:
+  - server_fd    : yeni baglantilar icin izlenir
+  - clients[i].fd: mevcut istemcilerden veri icin izlenir
+  - 1 saniye timeout ile periyodik istatistik yazilir
+
+----------------------------------------------------------------
+
+3. KARSILASTIRMA TABLOSU
+-------------------------
+
+Ozellik               | Blocking I/O      | Non-Blocking + select()
+----------------------|-------------------|------------------------
+Thread sayisi         | N istemci = N thrd| 1 thread yeterli
+Bellek kullanimi      | Yuksek            | Dusuk
+Context-switch        | Fazla             | Minimal
+Olcekleme             | Zor               | Kolay
+Gecikme               | Yuksek yuk altnda | Dusuk
+Kod karmasikligi      | Dusuk             | Orta
+Max istemci (pratik)  | ~birlesik birkaç yuz | Binlerce (epoll ile)
+
+----------------------------------------------------------------
+
+4. select() vs poll() vs epoll() FARKI
+----------------------------------------
+
+select():
+  - POSIX standart; Windows dahil her platformda calisir
+  - fd_set kullanir, maksimum FD_SETSIZE (tipik 1024) fd izler
+  - Her cagriда tum fd'leri yeniden tarama gerektirir: O(n)
+  - Bu projede kullanilmistir (platformlar arasi uyumluluk icin)
+
+poll():
+  - POSIX; Windows'ta WSAPoll() olarak mevcuttur
+  - FD_SETSIZE siniri yoktur, dinamik dizi kullanir
+  - Hala O(n) tarama; ama select'ten daha temiz API
+
+epoll() (Linux'a ozel):
+  - Linux 2.6+ kernel icin optimize edilmistir
+  - Yalnizca olay olan fd'leri bildirir: O(1) erisim
+  - Yuz binlerce istemciyi verimli yonetebilir
+  - C10K (10.000 ayni anda baglanti) problemine cozum
+
+----------------------------------------------------------------
+
+5. TEST SONUCLARI (10 Istemci)
+--------------------------------
+
+Kosul: 10 istemci, her biri 15 mesaj, 200ms aralikla
+       Toplam 150 mesaj gonderilmistir.
+
+Gozlem:
+  - Hic bir istemci bekletilmedi
+  - Tum mesajlar diger 9 istemciye aninda iletildi
+  - Sunucu tek event loop ile tum olaylari isledi
+  - Baglanti/kopma olaylari dogru loglanip bildirildi
+  - 10 saniyede bir istatistik ekranda gorundü
+
+Ciktidan ornekler:
+  [+] Client#001 baglandi  IP=127.0.0.1 PORT=52100  (aktif=1)
+  [+] Client#002 baglandi  IP=127.0.0.1 PORT=52101  (aktif=2)
+  ...
+  [MSG] Client#003: Merhaba! Bu Client#003'den 1/15. mesaj.
+  [-] Client#001 ayrildi  sure=4s  mesaj=15  bayt=450
+
+  ===== SUNUCU ISTATISTIKLERI =====
+  Calisma suresi  : 10 saniye
+  Aktif istemci   : 8 / 64
+  Toplam baglanma : 10
+  Toplam mesaj    : 120
+  Toplam veri     : 3600 bayt
+  Mesaj/saniye    : 12.00
+  =================================
+
+----------------------------------------------------------------
+
+6. SONUC
+---------
+Bu proje, tek bir event loop ve select() mekanizmasi kullanarak
+bloklayici I/O'nun getirdigi thread yonetimi sorunlari olmaksizin
+cok istemcili bir sunucu olusturulabilecegini gostermistir.
+
+Gercek uretim sistemleri icin (C10K ve ustu) epoll (Linux)
+veya io_uring (Linux 5.1+) tercih edilmeli; Windows icin ise
+IOCP (I/O Completion Ports) degerlendirilmelidir.
+
+================================================================

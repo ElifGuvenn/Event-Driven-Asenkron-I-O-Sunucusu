@@ -1,0 +1,16 @@
+# Derlenmiş dosyalar
+*.exe
+*.o
+*.obj
+*.out
+
+# Log dosyaları
+server_log.txt
+*.log
+
+# VS Code (makine spesifik)
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini
