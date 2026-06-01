@@ -1,7 +1,7 @@
 param(
-    [int]$n = 10,
-    [int]$m = 15,
-    [int]$d = 200
+    [int]$n = 20,
+    [int]$m = 40,
+    [int]$d = 300
 )
 
 $exe = Join-Path $PSScriptRoot "client.exe"

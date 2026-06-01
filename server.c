@@ -210,6 +210,7 @@ static void handle_client_data(int idx) {
     while (lb > 0 && (log_buf[lb-1] == '\n' || log_buf[lb-1] == '\r')) lb--;
     log_buf[lb] = '\0';
 
+
     printf("[MSG] %-12s: %s\n", clients[idx].name, log_buf);
 
     /* Tum diger istemcilere ilet */
