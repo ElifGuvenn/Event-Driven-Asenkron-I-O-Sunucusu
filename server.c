@@ -38,6 +38,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <pthread.h>
 
 /* ---- Sabitler ---- */
 #define PORT            8080
@@ -45,6 +46,7 @@
 #define BUFFER_SIZE     1024
 #define STATS_INTERVAL  10      /* saniyede bir istatistik yazdir */
 #define BACKLOG         16
+#define LOG_FILE        "server.log"
 
 /* ---- Istemci kaydi ---- */
 typedef struct {
@@ -65,6 +67,10 @@ static long long total_msgs    = 0;
 static long long total_bytes   = 0;
 static time_t   server_start;
 static volatile int running    = 1;
+
+static pthread_mutex_t stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t       logger_tid;
+static int             logger_running = 0;
 
 /* ---- Yardimci: istemci slotu bul ---- */
 static int find_slot(void) {
@@ -106,17 +112,63 @@ static void notify_all(const char *msg) {
             safe_send(clients[i].fd, msg, len);
 }
 
+/* ---- Logger thread: istatistikleri server.log dosyasina yazar ---- */
+static void *logger_thread(void *arg) {
+    (void)arg;
+    FILE *f = fopen(LOG_FILE, "a");
+    if (!f) {
+        fprintf(stderr, "HATA: %s acilamadi: %s\n", LOG_FILE, strerror(errno));
+        return NULL;
+    }
+    fprintf(f, "=== Sunucu baslatildi ===\n");
+    fflush(f);
+
+    while (running) {
+        /* 1'er saniye uyuyarak STATS_INTERVAL saniye bekle,
+           running kapandiginda en fazla 1 sn'de cik */
+        for (int i = 0; i < STATS_INTERVAL && running; i++) {
+#ifdef _WIN32
+            Sleep(1000);
+#else
+            sleep(1);
+#endif
+        }
+        if (!running) break;
+
+        pthread_mutex_lock(&stats_mutex);
+        double uptime = difftime(time(NULL), server_start);
+        fprintf(f, "[%ld] uptime=%.0fs aktif=%d baglanti=%d mesaj=%lld bayt=%lld",
+                (long)time(NULL), uptime, active_count, total_conns, total_msgs, total_bytes);
+        if (uptime > 0)
+            fprintf(f, " msg/s=%.2f", (double)total_msgs / uptime);
+        fprintf(f, "\n");
+        fflush(f);
+        pthread_mutex_unlock(&stats_mutex);
+    }
+
+    fprintf(f, "=== Sunucu kapatildi ===\n");
+    fclose(f);
+    return NULL;
+}
+
 /* ---- Istatistik yazdir ---- */
 static void print_stats(void) {
-    double uptime = difftime(time(NULL), server_start);
+    pthread_mutex_lock(&stats_mutex);
+    double    uptime = difftime(time(NULL), server_start);
+    int       ac     = active_count;
+    int       tc     = total_conns;
+    long long tm     = total_msgs;
+    long long tb     = total_bytes;
+    pthread_mutex_unlock(&stats_mutex);
+
     printf("\n========== SUNUCU ISTATISTIKLERI ==========\n");
     printf("  Calisma suresi  : %.0f saniye\n", uptime);
-    printf("  Aktif istemci   : %d / %d\n", active_count, MAX_CLIENTS);
-    printf("  Toplam baglanma : %d\n", total_conns);
-    printf("  Toplam mesaj    : %lld\n", total_msgs);
-    printf("  Toplam veri     : %lld bayt\n", total_bytes);
+    printf("  Aktif istemci   : %d / %d\n", ac, MAX_CLIENTS);
+    printf("  Toplam baglanma : %d\n", tc);
+    printf("  Toplam mesaj    : %lld\n", tm);
+    printf("  Toplam veri     : %lld bayt\n", tb);
     if (uptime > 0)
-        printf("  Mesaj/saniye    : %.2f\n", (double)total_msgs / uptime);
+        printf("  Mesaj/saniye    : %.2f\n", (double)tm / uptime);
     printf("===========================================\n\n");
 }
 
@@ -144,9 +196,11 @@ static void handle_new_connection(sock_t server_fd) {
     clients[slot].bytes_rx     = 0;
     clients[slot].msg_count    = 0;
     clients[slot].active       = 1;
+    pthread_mutex_lock(&stats_mutex);
     snprintf(clients[slot].name, sizeof(clients[slot].name),
              "Client#%03d", ++total_conns);
     active_count++;
+    pthread_mutex_unlock(&stats_mutex);
 
     char ip[INET_ADDRSTRLEN];
     inet_ntop_compat(AF_INET, &caddr.sin_addr, ip, sizeof(ip));
@@ -187,7 +241,9 @@ static void handle_client_data(int idx) {
         CLOSE_SOCK(clients[idx].fd);
         clients[idx].active = 0;
         clients[idx].fd     = INVALID_SOCK;
+        pthread_mutex_lock(&stats_mutex);
         active_count--;
+        pthread_mutex_unlock(&stats_mutex);
 
         /* Bildirim, istemci kapatildiktan sonra gider */
         for (int i = 0; i < MAX_CLIENTS; i++)
@@ -197,10 +253,12 @@ static void handle_client_data(int idx) {
     }
 
     buf[n] = '\0';
+    pthread_mutex_lock(&stats_mutex);
     clients[idx].bytes_rx  += n;
     clients[idx].msg_count++;
     total_msgs++;
     total_bytes += n;
+    pthread_mutex_unlock(&stats_mutex);
 
     /* Satir sonunu temizle (logda duzgun gorunsun) */
     char log_buf[BUFFER_SIZE];
@@ -287,8 +345,17 @@ int main(void) {
     printf("  Port      : %d\n", PORT);
     printf("  Kapasite  : %d istemci\n", MAX_CLIENTS);
     printf("  Mod       : Broadcast Chat\n");
+    printf("  Log dosyasi: %s\n", LOG_FILE);
     printf("  Cikis     : Ctrl+C\n");
     printf("============================================\n\n");
+
+    /* Logger thread'i baslat */
+    if (pthread_create(&logger_tid, NULL, logger_thread, NULL) == 0) {
+        logger_running = 1;
+        printf("[LOG] Logger thread baslatildi -> %s\n\n", LOG_FILE);
+    } else {
+        perror("pthread_create");
+    }
 
     time_t last_stats = time(NULL);
 
@@ -356,6 +423,9 @@ int main(void) {
         if (clients[i].active) CLOSE_SOCK(clients[i].fd);
     CLOSE_SOCK(server_fd);
     print_stats();
+
+    if (logger_running)
+        pthread_join(logger_tid, NULL);
 
 #ifdef _WIN32
     WSACleanup();

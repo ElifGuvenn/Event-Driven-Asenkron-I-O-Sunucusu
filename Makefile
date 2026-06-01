@@ -9,13 +9,13 @@ LDFLAGS =
 
 # Windows tespiti
 ifeq ($(OS),Windows_NT)
-    LDFLAGS += -lws2_32
+    LDFLAGS += -lws2_32 -lpthread
     EXT      = .exe
     RM       = del /Q
     SEP      = \\
 else
-    # Linux'ta pthread gerekebilir (burada kullanilmiyor)
     CFLAGS  += -D_POSIX_C_SOURCE=200112L
+    LDFLAGS += -lpthread
     EXT      =
     RM       = rm -f
     SEP      = /
